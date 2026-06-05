@@ -1,0 +1,11 @@
+.codex/
+dist/
+build/
+target/
+_build/
+*.log
+*.tmp
+node_modules/
+*.env
+*.DS_Store
+*.bak
