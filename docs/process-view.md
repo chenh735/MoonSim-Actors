@@ -1,110 +1,99 @@
 # MoonSim Actors 进程视图
 
-进程视图描述运行时行为、并发模型和关键动态关系。
+进程视图描述运行时的动态流程。当前版本是单进程、单 runtime、确定性事件循环。
 
-## 运行模型
+## tell 流程
 
-第一阶段推荐单进程、单模拟运行时、确定性事件循环：
-
-```mermaid
-stateDiagram-v2
-    [*] --> Init
-    Init --> Ready: spawn actors
-    Ready --> PickEvent: event queue not empty
-    PickEvent --> ApplyFault: choose by deterministic scheduler
-    ApplyFault --> Deliver: deliver message or timer
-    Deliver --> RunActor: actor receive
-    RunActor --> RecordTrace: append event
-    RecordTrace --> Ready
-    Ready --> Finished: no events or stop condition
-    Finished --> [*]
+```text
+ActorRef.tell
+-> SimRuntime.tell_to
+-> Envelope
+-> schedule_message
+-> FaultRule
+-> ScheduledEvent
+-> run_all
+-> apply_deliver
+-> mailbox
+-> handler side effect
+-> trace
 ```
 
-## 事件类型
-
-| 事件 | 说明 |
-| --- | --- |
-| `ActorSpawned` | 创建 actor。 |
-| `ActorStopped` | actor 正常停止。 |
-| `ActorFailed` | actor 处理消息失败。 |
-| `MessageSent` | 消息进入 runtime。 |
-| `MessageDelivered` | 消息投递到 mailbox 或 actor。 |
-| `MessageDropped` | 故障模型丢弃消息。 |
-| `TimerScheduled` | 创建虚拟时间定时器。 |
-| `TimerFired` | 定时器触发。 |
-| `NodePaused` | actor 或节点暂停。 |
-| `NodeResumed` | actor 或节点恢复。 |
-
-## 调度原则
-
-- 所有待处理事件进入统一 event queue。
-- scheduler 通过 seed 和当前状态选择下一个事件。
-- fault model 在事件投递前决定 delay/drop/reorder。
-- virtual clock 只在 runtime 决定时推进。
-- actor receive 不直接阻塞真实线程。
-
-## Ask/Timeout 流程
+## ask/reply 流程
 
 ```mermaid
 sequenceDiagram
-    participant Caller as Caller Actor
+    participant Caller
     participant Runtime as SimRuntime
-    participant Callee as Callee Actor
-    participant Clock as VirtualClock
+    participant Actor as ActorCell
+    participant Handler as Handler
 
-    Caller->>Runtime: ask(msg, timeout)
-    Runtime->>Clock: schedule timeout
-    Runtime->>Callee: deliver request
-    alt response before timeout
-        Callee->>Runtime: reply
-        Runtime->>Caller: Ok(response)
-        Runtime->>Clock: cancel timeout
-    else timeout first
-        Clock->>Runtime: timeout fired
-        Runtime->>Caller: Err(Timeout)
+    Caller->>Runtime: ask(payload, timeout)
+    Runtime->>Runtime: schedule request
+    Runtime->>Runtime: schedule timeout
+    Runtime->>Actor: deliver Envelope
+    Actor->>Handler: dispatch ActorKind
+    alt handler replies first
+        Handler->>Runtime: AskReply
+        Runtime->>Caller: AskOk(response)
+    else timeout fires first
+        Runtime->>Caller: AskErr(Timeout)
     end
 ```
 
-## 失败处理流程
+`Sink` actor 保留兼容路径：请求投递成功后直接返回原始 envelope。`Echo`、KV 和 `Scripted` actor 通过 handler reply。
 
-```mermaid
-sequenceDiagram
-    participant Runtime as SimRuntime
-    participant Actor as WorkerActor
-    participant Supervisor as Supervisor
-    participant Trace as TraceLog
+## scripted handler 流程
 
-    Runtime->>Actor: deliver message
-    Actor-->>Runtime: failed
-    Runtime->>Trace: record ActorFailed
-    Runtime->>Supervisor: notify failure
-    alt Restart
-        Supervisor->>Runtime: restart actor
-        Runtime->>Trace: record ActorRestarted
-    else Stop
-        Supervisor->>Runtime: stop actor
-        Runtime->>Trace: record ActorStopped
-    end
+```text
+deliver Envelope
+-> ActorKind.Scripted
+-> 按顺序扫描 HandlerRule
+-> HandlerMatch 命中
+-> HandlerAction
+   - ReplyText
+   - ReplyWithPayload
+   - PutFromParts
+   - GetFromParts
+   - NoAction
+-> 更新 actor state 或生成 AskReply
+-> trace
 ```
 
-## 重放流程
+## supervisor 流程
 
-```mermaid
-flowchart TD
-    Start["Start replay"] --> Load["Load trace log"]
-    Load --> Validate["Validate seed and version"]
-    Validate --> Runtime["Create SimRuntime"]
-    Runtime --> Feed["Feed recorded events"]
-    Feed --> Assert["Assert same outputs"]
-    Assert --> Report["Replay report"]
+```text
+spawn_child
+-> ActorCell.parent
+-> parent.children
+
+supervise_with_limit(actor, Restart, n)
+-> ActorFailed trace
+-> restart_count 检查
+-> restart_actor_tree 或 stop_actor_tree
 ```
 
-## 并发边界
+`stop` 和 `restart` 都会作用到 actor 的子树，便于模拟服务节点故障和恢复。
 
-第一阶段不追求多线程并发执行。系统应优先保证确定性、可测试和可重放。
+## trace/replay 流程
 
-- actor 可以表达异步逻辑。
-- runtime 内部用确定性事件循环驱动。
-- 虚拟时间由 runtime 推进。
-- 真实时间只用于 CLI 统计，不参与模拟逻辑。
+```text
+trace_archive / trace_json
+-> write_trace_file
+-> replay_trace_file
+-> replay_trace_archive 或 replay_trace_json
+-> ReplayCheck
+```
 
+JSON replay 会先用 `@json.valid` 校验文档合法性，再读取 seed 和事件数量。
+
+## benchmark 流程
+
+```text
+run_mailbox_bench
+-> monotonic_clock_start
+-> 构造 runtime 并发送 N 条消息
+-> run_all
+-> monotonic_clock_end
+-> BenchSummary
+-> text / Markdown / JSON
+```

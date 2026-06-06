@@ -1,5 +1,6 @@
 import {
   "chenhao/moonsim-actors" @core,
+  "moonbitlang/core/env",
 }
 
 options(

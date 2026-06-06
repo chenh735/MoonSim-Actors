@@ -1,4 +1,4 @@
 ///|
 fn main {
-  println(@core.kv_demo_report(42))
+  println(@core.cli_report(@env.args()))
 }
